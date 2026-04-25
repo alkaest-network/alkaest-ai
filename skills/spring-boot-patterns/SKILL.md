@@ -1,267 +1,211 @@
 ---
 name: spring-boot-patterns
-description: Spring Boot best practices and patterns. Use when creating controllers, services, repositories, or when user asks about Spring Boot architecture, REST APIs, exception handling, or JPA patterns.
+description: Spring Boot 4.x patterns for this project. Use when creating controllers, services, repositories, or reviewing Spring Boot code. Covers JdbcClient (not JPA), package-by-feature structure, @ConditionalOnProperty, records, no Lombok.
 ---
 
 # Spring Boot Patterns Skill
 
-Best practices and patterns for Spring Boot applications.
+Patterns for this project: Spring Boot 4.x, Java 25, `JdbcClient`, package-by-feature, no Lombok, no JPA/Hibernate.
 
-## When to Use
-- User says "create controller" / "add service" / "Spring Boot help"
-- Reviewing Spring Boot code
-- Setting up new Spring Boot project structure
-
-## Project Structure
+## Project Structure (package-by-feature)
 
 ```
-src/main/java/com/example/myapp/
-├── MyAppApplication.java          # @SpringBootApplication
-├── config/                        # Configuration classes
-│   ├── SecurityConfig.java
-│   └── WebConfig.java
-├── controller/                    # REST controllers
-│   └── UserController.java
-├── service/                       # Business logic
-│   ├── UserService.java
-│   └── impl/
-│       └── UserServiceImpl.java
-├── repository/                    # Data access
-│   └── UserRepository.java
-├── model/                         # Entities
-│   └── User.java
-├── dto/                           # Data transfer objects
-│   ├── request/
-│   │   └── CreateUserRequest.java
-│   └── response/
-│       └── UserResponse.java
-├── exception/                     # Custom exceptions
-│   ├── ResourceNotFoundException.java
-│   └── GlobalExceptionHandler.java
-└── util/                          # Utilities
-    └── DateUtils.java
+src/main/java/org/alkaest/chatbot/
+├── ChatbotApplication.java
+├── scheduling/                    # feature: booking flow
+│   ├── domain/
+│   │   ├── Appointment.java       # record or final class
+│   │   └── AppointmentStatus.java
+│   ├── ports/
+│   │   ├── AppointmentRepository.java   # interface
+│   │   └── BookingCalendarPort.java     # interface
+│   ├── adapters/
+│   │   ├── JdbcAppointmentRepository.java
+│   │   └── GoogleCalendarBookingAdapter.java
+│   └── AppointmentService.java
+├── conversation/
+│   ├── domain/
+│   ├── ports/
+│   └── adapters/
+└── notification/
+    └── domain/
+        └── ResponseGenerator.java  # pure domain, no Spring deps
 ```
+
+No `controller/`, `service/`, `repository/` top-level packages — features own their entire slice.
 
 ---
 
 ## Controller Patterns
 
-### REST Controller Template
 ```java
 @RestController
-@RequestMapping("/api/v1/users")
-@RequiredArgsConstructor  // Lombok for constructor injection
-public class UserController {
+@RequestMapping("/webhook/whatsapp")
+public class WhatsAppWebhookController {
 
-    private final UserService userService;
+    private final ConversationService conversationService;
 
-    @GetMapping
-    public ResponseEntity<List<UserResponse>> getAll() {
-        return ResponseEntity.ok(userService.findAll());
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<UserResponse> getById(@PathVariable Long id) {
-        return ResponseEntity.ok(userService.findById(id));
+    public WhatsAppWebhookController(ConversationService conversationService) {
+        this.conversationService = conversationService;
     }
 
     @PostMapping
-    public ResponseEntity<UserResponse> create(
-            @Valid @RequestBody CreateUserRequest request) {
-        UserResponse created = userService.create(request);
-        URI location = ServletUriComponentsBuilder.fromCurrentRequest()
-            .path("/{id}")
-            .buildAndExpand(created.getId())
-            .toUri();
-        return ResponseEntity.created(location).body(created);
-    }
-
-    @PutMapping("/{id}")
-    public ResponseEntity<UserResponse> update(
-            @PathVariable Long id,
-            @Valid @RequestBody UpdateUserRequest request) {
-        return ResponseEntity.ok(userService.update(id, request));
-    }
-
-    @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
-        userService.delete(id);
-        return ResponseEntity.noContent().build();
+    public ResponseEntity<Void> receive(@Valid @RequestBody InboundMessageRequest request) {
+        conversationService.handle(request);
+        return ResponseEntity.ok().build();
     }
 }
 ```
 
-### Controller Best Practices
+- Constructor injection, no `@Autowired`, no Lombok `@RequiredArgsConstructor`
+- `@Valid` on request body, always
+- Return `ResponseEntity<Void>` for fire-and-forget endpoints
+- Never return entity/domain objects directly — use records as response types
 
-| Practice | Example |
-|----------|---------|
-| Versioned API | `/api/v1/users` |
-| Plural nouns | `/users` not `/user` |
-| HTTP methods | GET=read, POST=create, PUT=update, DELETE=delete |
-| Status codes | 200=OK, 201=Created, 204=NoContent, 404=NotFound |
-| Validation | `@Valid` on request body |
+### Conditional controllers
 
-### ❌ Anti-patterns
 ```java
-// ❌ Business logic in controller
-@PostMapping
-public User create(@RequestBody User user) {
-    user.setCreatedAt(LocalDateTime.now());  // Logic belongs in service
-    return userRepository.save(user);         // Direct repo access
-}
+@RestController
+@ConditionalOnProperty(name = "app.calendar.enabled", havingValue = "true")
+public class GoogleCalendarWebhookController { ... }
+```
 
-// ❌ Returning entity directly (exposes internals)
-@GetMapping("/{id}")
-public User getById(@PathVariable Long id) {
-    return userRepository.findById(id).get();
+Tests for conditional controllers must activate the property:
+
+```java
+@WebMvcTest(GoogleCalendarWebhookController.class)
+@TestPropertySource(properties = "app.calendar.enabled=true")
+class GoogleCalendarWebhookControllerTest { ... }
+```
+
+---
+
+## Repository Patterns (JdbcClient only — no JPA)
+
+```java
+@Repository
+public class JdbcAppointmentRepository implements AppointmentRepository {
+
+    private final JdbcClient jdbc;
+
+    public JdbcAppointmentRepository(JdbcClient jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    public Optional<Appointment> findById(long id) {
+        return jdbc.sql("SELECT * FROM appointments WHERE id = :id")
+                .param("id", id)
+                .query(this::mapRow)
+                .optional();
+    }
+
+    public List<Appointment> findByPhoneAndStatus(String phone, AppointmentStatus status) {
+        return jdbc.sql("""
+                SELECT * FROM appointments
+                WHERE customer_phone = :phone AND status = :status
+                ORDER BY appointment_time
+                """)
+                .param("phone", phone)
+                .param("status", status.name())
+                .query(this::mapRow)
+                .list();
+    }
+
+    public void save(Appointment appt) {
+        jdbc.sql("""
+                INSERT INTO appointments (customer_phone, professional_id, appointment_time, status)
+                VALUES (:phone, :professionalId, :time, :status)
+                """)
+                .param("phone", appt.customerPhone())
+                .param("professionalId", appt.professionalId())
+                .param("time", appt.appointmentTime())
+                .param("status", appt.status().name())
+                .update();
+    }
+
+    private Appointment mapRow(ResultSet rs, int rowNum) throws SQLException {
+        return new Appointment(
+                rs.getLong("id"),
+                rs.getString("customer_phone"),
+                rs.getLong("professional_id"),
+                rs.getObject("appointment_time", LocalDateTime.class),
+                AppointmentStatus.valueOf(rs.getString("status")));
+    }
 }
 ```
+
+### JdbcClient rules
+- Always use named params (`:name`), never positional `?`
+- `.query(rowMapper).list()` for collections, `.optional()` for single
+- `.update()` for INSERT/UPDATE/DELETE (returns row count)
+- Raw `rowMapper` method per entity — no `BeanPropertyRowMapper` (fragile with records)
+- `@Transactional` on service methods, not repositories
 
 ---
 
 ## Service Patterns
 
-### Service Interface + Implementation
 ```java
-// Interface
-public interface UserService {
-    List<UserResponse> findAll();
-    UserResponse findById(Long id);
-    UserResponse create(CreateUserRequest request);
-    UserResponse update(Long id, UpdateUserRequest request);
-    void delete(Long id);
-}
-
-// Implementation
 @Service
-@RequiredArgsConstructor
-@Transactional(readOnly = true)  // Default read-only
-public class UserServiceImpl implements UserService {
+public class AppointmentService {
 
-    private final UserRepository userRepository;
-    private final UserMapper userMapper;
+    private final AppointmentRepository appointmentRepository;
+    private final BookingCalendarPort calendarPort;
 
-    @Override
-    public List<UserResponse> findAll() {
-        return userRepository.findAll().stream()
-            .map(userMapper::toResponse)
-            .toList();
+    public AppointmentService(
+            AppointmentRepository appointmentRepository,
+            BookingCalendarPort calendarPort) {
+        this.appointmentRepository = appointmentRepository;
+        this.calendarPort = calendarPort;
     }
 
-    @Override
-    public UserResponse findById(Long id) {
-        return userRepository.findById(id)
-            .map(userMapper::toResponse)
-            .orElseThrow(() -> new ResourceNotFoundException("User", id));
-    }
-
-    @Override
-    @Transactional  // Write transaction
-    public UserResponse create(CreateUserRequest request) {
-        User user = userMapper.toEntity(request);
-        User saved = userRepository.save(user);
-        return userMapper.toResponse(saved);
-    }
-
-    @Override
     @Transactional
-    public void delete(Long id) {
-        if (!userRepository.existsById(id)) {
-            throw new ResourceNotFoundException("User", id);
+    public BookingResult book(BookingRequest request) {
+        // domain logic here, not in controller or repository
+        var slot = calendarPort.findAvailableSlot(request.professionalId(), request.date());
+        if (slot.isEmpty()) {
+            return BookingResult.noSlot();
         }
-        userRepository.deleteById(id);
+        var appointment = new Appointment(...);
+        appointmentRepository.save(appointment);
+        calendarPort.createEvent(appointment);
+        return BookingResult.booked(appointment);
     }
 }
 ```
 
-### Service Best Practices
-
-- Interface + Impl for testability
-- `@Transactional(readOnly = true)` at class level
-- `@Transactional` for write methods
-- Throw domain exceptions, not generic ones
-- Use mappers (MapStruct) for entity ↔ DTO conversion
+- Services own `@Transactional` — repositories are transaction-participants, not owners
+- Return sealed domain result types instead of throwing for expected failures
+- No `readOnly = true` default — add it explicitly per method when needed
 
 ---
 
-## Repository Patterns
+## DTO Patterns (Java records)
 
-### JPA Repository
 ```java
-public interface UserRepository extends JpaRepository<User, Long> {
-
-    // Derived query
-    Optional<User> findByEmail(String email);
-
-    List<User> findByActiveTrue();
-
-    // Custom query
-    @Query("SELECT u FROM User u WHERE u.department.id = :deptId")
-    List<User> findByDepartmentId(@Param("deptId") Long departmentId);
-
-    // Native query (use sparingly)
-    @Query(value = "SELECT * FROM users WHERE created_at > :date",
-           nativeQuery = true)
-    List<User> findRecentUsers(@Param("date") LocalDate date);
-
-    // Exists check (more efficient than findBy)
-    boolean existsByEmail(String email);
-
-    // Count
-    long countByActiveTrue();
-}
-```
-
-### Repository Best Practices
-
-- Use derived queries when possible
-- `Optional` for single results
-- `existsBy` instead of `findBy` for existence checks
-- Avoid native queries unless necessary
-- Use `@EntityGraph` for fetch optimization
-
----
-
-## DTO Patterns
-
-### Request/Response DTOs
-```java
-// Request DTO with validation
-public record CreateUserRequest(
-    @NotBlank(message = "Name is required")
-    @Size(min = 2, max = 100)
-    String name,
-
-    @NotBlank
-    @Email(message = "Invalid email format")
-    String email,
-
-    @NotNull
-    @Min(18)
-    Integer age
+// Inbound HTTP request
+public record InboundMessageRequest(
+    @NotBlank String phone,
+    @NotBlank String message,
+    @NotNull Instant timestamp
 ) {}
 
-// Response DTO
-public record UserResponse(
-    Long id,
-    String name,
-    String email,
-    LocalDateTime createdAt
+// Outbound HTTP response
+public record BookingConfirmation(
+    long appointmentId,
+    String professionalName,
+    LocalDate date,
+    LocalTime time
 ) {}
 ```
 
-### MapStruct Mapper
+No MapStruct, no ModelMapper — map manually in service or a static factory method on the record:
+
 ```java
-@Mapper(componentModel = "spring")
-public interface UserMapper {
-
-    UserResponse toResponse(User entity);
-
-    List<UserResponse> toResponseList(List<User> entities);
-
-    @Mapping(target = "id", ignore = true)
-    @Mapping(target = "createdAt", ignore = true)
-    User toEntity(CreateUserRequest request);
+public record BookingConfirmation(...) {
+    static BookingConfirmation from(Appointment a, Professional p) {
+        return new BookingConfirmation(a.id(), p.name(), a.date(), a.time());
+    }
 }
 ```
 
@@ -269,211 +213,97 @@ public interface UserMapper {
 
 ## Exception Handling
 
-### Custom Exceptions
-```java
-public class ResourceNotFoundException extends RuntimeException {
-
-    public ResourceNotFoundException(String resource, Long id) {
-        super(String.format("%s not found with id: %d", resource, id));
-    }
-}
-
-public class BusinessException extends RuntimeException {
-
-    private final String code;
-
-    public BusinessException(String code, String message) {
-        super(message);
-        this.code = code;
-    }
-}
-```
-
-### Global Exception Handler
 ```java
 @RestControllerAdvice
-@Slf4j
 public class GlobalExceptionHandler {
 
-    @ExceptionHandler(ResourceNotFoundException.class)
-    public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex) {
-        log.warn("Resource not found: {}", ex.getMessage());
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-            .body(new ErrorResponse("NOT_FOUND", ex.getMessage()));
-    }
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ErrorResponse> handleValidation(
-            MethodArgumentNotValidException ex) {
-        List<String> errors = ex.getBindingResult().getFieldErrors().stream()
-            .map(e -> e.getField() + ": " + e.getDefaultMessage())
-            .toList();
-        return ResponseEntity.badRequest()
-            .body(new ErrorResponse("VALIDATION_ERROR", errors.toString()));
+    public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex) {
+        var errors = ex.getBindingResult().getFieldErrors().stream()
+                .map(e -> e.getField() + ": " + e.getDefaultMessage())
+                .toList();
+        return ResponseEntity.badRequest().body(new ErrorResponse("VALIDATION_ERROR", errors.toString()));
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(Exception ex) {
-        log.error("Unexpected error", ex);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-            .body(new ErrorResponse("INTERNAL_ERROR", "An unexpected error occurred"));
+        log.error("Unhandled error", ex);
+        return ResponseEntity.internalServerError()
+                .body(new ErrorResponse("INTERNAL_ERROR", "Unexpected error"));
     }
 }
 
 public record ErrorResponse(String code, String message) {}
 ```
 
+Use `LoggerFactory.getLogger(...)` — no `@Slf4j` (no Lombok).
+
 ---
 
 ## Configuration Patterns
 
-### Application Properties
+```java
+// Bind typed config from application.yml
+@ConfigurationProperties(prefix = "app.calendar")
+public record CalendarProperties(
+    boolean enabled,
+    String webhookUrl,
+    String credentials
+) {}
+
+// Register it
+@SpringBootApplication
+@ConfigurationPropertiesScan
+public class ChatbotApplication { ... }
+```
+
 ```yaml
 # application.yml
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/mydb
-    username: ${DB_USER}
-    password: ${DB_PASSWORD}
-  jpa:
-    hibernate:
-      ddl-auto: validate  # Never 'create' in production!
-    show-sql: false
-
 app:
-  jwt:
-    secret: ${JWT_SECRET}
-    expiration: 86400000
+  calendar:
+    enabled: ${CALENDAR_ENABLED:false}
+    webhook-url: ${CALENDAR_WEBHOOK_URL:}
+    credentials: ${CALENDAR_CREDENTIALS:}
 ```
 
-### Configuration Properties Class
+Feature flags via `@ConditionalOnProperty`:
+
 ```java
-@Configuration
-@ConfigurationProperties(prefix = "app.jwt")
-@Validated
-public class JwtProperties {
-
-    @NotBlank
-    private String secret;
-
-    @Min(60000)
-    private long expiration;
-
-    // getters and setters
-}
-```
-
-### Profile-Specific Configuration
-```
-src/main/resources/
-├── application.yml           # Common config
-├── application-dev.yml       # Development
-├── application-test.yml      # Testing
-└── application-prod.yml      # Production
+@Bean
+@ConditionalOnProperty(name = "app.calendar.enabled", havingValue = "true")
+public GoogleCalendarBookingAdapter calendarAdapter(...) { ... }
 ```
 
 ---
 
-## Common Annotations Quick Reference
+## Testing Quick Reference
 
-| Annotation | Purpose |
-|------------|---------|
-| `@RestController` | REST controller (combines @Controller + @ResponseBody) |
-| `@Service` | Business logic component |
-| `@Repository` | Data access component |
-| `@Configuration` | Configuration class |
-| `@RequiredArgsConstructor` | Lombok: constructor injection |
-| `@Transactional` | Transaction management |
-| `@Valid` | Trigger validation |
-| `@ConfigurationProperties` | Bind properties to class |
-| `@Profile("dev")` | Profile-specific bean |
-| `@Scheduled` | Scheduled tasks |
+| Test type | Annotation | When |
+|-----------|-----------|------|
+| Unit | `@ExtendWith(MockitoExtension.class)` | pure logic, no Spring context |
+| Web slice | `@WebMvcTest(Controller.class)` | controller + serialization only |
+| JDBC integration | `@JdbcTest` + `@Testcontainers` | repository against real DB |
+| Full integration | `@SpringBootTest` + `@Testcontainers` | end-to-end flow |
 
----
+Integration tests use `*IT.java` naming so Failsafe runs them on `mvn verify`, not `mvn test`.
 
-## Testing Patterns
-
-### Controller Test (MockMvc)
 ```java
-@WebMvcTest(UserController.class)
-class UserControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @MockBean
-    private UserService userService;
-
-    @Test
-    void shouldReturnUser() throws Exception {
-        when(userService.findById(1L))
-            .thenReturn(new UserResponse(1L, "John", "john@example.com", null));
-
-        mockMvc.perform(get("/api/v1/users/1"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.name").value("John"));
-    }
-}
-```
-
-### Service Test
-```java
-@ExtendWith(MockitoExtension.class)
-class UserServiceImplTest {
-
-    @Mock
-    private UserRepository userRepository;
-
-    @Mock
-    private UserMapper userMapper;
-
-    @InjectMocks
-    private UserServiceImpl userService;
-
-    @Test
-    void shouldThrowWhenUserNotFound() {
-        when(userRepository.findById(1L)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> userService.findById(1L))
-            .isInstanceOf(ResourceNotFoundException.class);
-    }
-}
-```
-
-### Integration Test
-```java
-@SpringBootTest
-@AutoConfigureMockMvc
+// JDBC integration test pattern
+@JdbcTest
+@AutoConfigureTestDatabase(replace = NONE)
 @Testcontainers
-class UserIntegrationTest {
+class JdbcAppointmentRepositoryIT {
 
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15");
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18");
 
-    @Autowired
-    private MockMvc mockMvc;
+    @Autowired JdbcClient jdbc;
+    JdbcAppointmentRepository repo;
 
-    @Test
-    void shouldCreateUser() throws Exception {
-        mockMvc.perform(post("/api/v1/users")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("""
-                    {"name": "John", "email": "john@example.com", "age": 25}
-                    """))
-            .andExpect(status().isCreated());
-    }
+    @BeforeEach
+    void setUp() { repo = new JdbcAppointmentRepository(jdbc); }
 }
 ```
-
----
-
-## Quick Reference Card
-
-| Layer | Responsibility | Annotations |
-|-------|---------------|-------------|
-| Controller | HTTP handling, validation | `@RestController`, `@Valid` |
-| Service | Business logic, transactions | `@Service`, `@Transactional` |
-| Repository | Data access | `@Repository`, extends `JpaRepository` |
-| DTO | Data transfer | Records with validation annotations |
-| Config | Configuration | `@Configuration`, `@ConfigurationProperties` |
-| Exception | Error handling | `@RestControllerAdvice` |
