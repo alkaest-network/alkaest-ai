@@ -27,6 +27,7 @@ Technical reference guides for the stack:
 | Reference | Purpose |
 |---|---|
 | `SPRING-BOOT-4.md` | Spring Boot 4.0 migration guide — real gotchas, not the official docs |
+| `SPRING-AI.md` | Spring AI 2.x ChatClient API, Ollama config, structured output, known quirks |
 | `TEST.md` | Spring Boot testing best practices — TestContainers 2.0, Maven Failsafe traps |
 | `LOGGING.md` | Structured logging guidance |
 | `SECURITY.md` | Java security checklist (OWASP Top 10) |
@@ -50,8 +51,12 @@ Focused expertise modules for specific audit and review tasks:
 | `performance-smell-detection` | Performance bottleneck detection |
 | `security-audit` | OWASP Top 10 security audit for Java |
 | `solid-principles` | SOLID design principles |
-| `spring-boot-patterns` | Spring Boot best practices |
-| `test-quality` | JUnit 5 + AssertJ test quality — 576 lines of practical guidance |
+| `spring-boot-patterns` | Spring Boot 4.x patterns — JdbcClient, package-by-feature, no Lombok/JPA |
+| `spring-ai-patterns` | Spring AI 2.x — ChatClient, Ollama structured output, retry, fallback |
+| `jdbc-client-patterns` | JdbcClient — named params, row mappers, batch ops, transaction ownership |
+| `observability-patterns` | Micrometer counters/timers, low-cardinality tags, OTLP traces, MDC |
+| `aot-hints` | GraalVM AOT hints — RuntimeHintsRegistrar, @RegisterReflectionForBinding |
+| `test-quality` | JUnit 5 + AssertJ test quality — practical guidance |
 | `changelog-generator` | Automated changelog generation |
 
 ## How to use
